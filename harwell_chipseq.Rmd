@@ -1,0 +1,220 @@
+---
+title: "Harwell Prdm16 ChIP-Seq Analysis"
+output:
+  html_document:
+    theme: cerulean
+    toc: true
+    toc_depth: 4
+    fig_caption: true
+    fig_width: 8
+    fig_height: 6
+author: "Meeta Mistry"
+date: "03/1/2016"
+---
+
+
+```{r setup-var, echo=FALSE}
+ 
+# Setup report details
+clientname="Manuel Baizabal"
+clientemail="manuel_baizabal@hms.harvard.edu"
+lablocation="Harwell lab" 
+analystname="Meeta Mistry"
+analystemail="mmistry@hsph.harvard.edu"
+```
+
+ChIP-Seq analysis for `r clientname` (`r clientemail`) from the `r lablocation`. Contact `r analystname` (`r analystemail`) for additional details. Request from client was:     
+
+> We have two conditions 1ug and 4ug of anti-Prdm16 antibody, with 2 biological replicates for each condition. I used a recently described protocol that involves chromatin cross-linking and nuclease digestion. In comparison to sonication, this method is far more sensitive and in some cases might result in around 50K unique TF binding sites of which approximately 20K-30K sites are not identified by traditional sonication protocols. One particular feature of this protocol is that the **binding sites appear as a region with multiple peaks instead of the usual single peaks observed with sonication**.
+
+
+Experimental design:
+
+* There are a total of 8 libraries, with around 30M - 40M reads per sample. Two replicates per condition, with an input sample for each replicate
+* Libraries were single-End 50bp, sequencing carried out at BPF
+
+
+## Setup
+
+```{r qc-setup}
+library(ggplot2)
+library(reshape)
+library(gplots)
+library(png)
+library(CHBUtils)
+library(pheatmap)
+library(grid)
+library(gridExtra)
+
+baseDir = "/home/mistrm82/R/harwell_chipseq"
+summary_stats = file.path(baseDir, 'project-summary.csv')
+summarydata = read.csv(summary_stats)
+
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442",
+"#0072B2", "#D55E00", "#CC79A7")
+
+# Apply shortnames for consistency
+shortname = paste(summarydata$antibody, summarydata$batch, summarydata$phenotype, sep="_")
+summarydata$shortname <- factor(shortname)
+```
+
+
+## Alignment 
+The raw reads for each sample were aligned to the reference genome (mm10) using Bowtie2 (version 2.2.7). Reads were filtered such that only uniquely mapping reads were retained for each sample. Below we have plotted an overview of summary statistics from the alignment. 
+
+The total number of reads vary between 30 and 40 million. The mapping rate is very good at > 95% for all samples, nothing is particularly unusual.
+
+### Total reads
+
+```{r read-plot}
+ggplot(summarydata, aes(x=shortname, y=Total.reads)) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=45, hjust=1)) +
+    geom_bar(stat="identity") +
+    ylab("total reads") + xlab("") +
+    theme(axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) 
+```
+
+### Mapping rate
+
+```{r maprate-plot}
+ggplot(summarydata, aes(x=shortname, y=(Mapped.reads/Total.reads))) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=45, hjust=1)) +
+    geom_bar(stat="identity") +
+    ylab("mapping rate") + xlab("") +
+    theme(axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) 
+```
+
+## Quality Measures
+
+We used the [phantompeakqualtools package](https://code.google.com/p/phantompeakqualtools/) to compute informative enrichment and quality measures for ChIP-seq  data. This tool computes the predominant insert-size (fragment length) based on strand cross-correlation peak, and computes data quality measures based on relative phantom peak. Some of these measures are displayed and described below, but the full table of results can be downloaded from the links [provided here](./qc/quality_summary.txt).
+
+**NSC (normalized strand cross-correlation coefficient)**: The normalized ratio between the fragment-length cross-correlation peak and the background cross-correlation. Values range from a minimum of 1 to larger positive numbers. 1.1 is the critical threshold. Datasets with NSC values much less than 1.1 (< 1.05) tend to have low signal to noise or few peaks (this could be biological eg.a factor that truly binds only a few sites in a particular tissue type OR it could be due to poor quality).  
+										
+**RSC (relative strand cross-correlation coefficient)**: The ratio between the fragment-length peak and the read-length peak values range from 0 to larger positive values. 1 is the critical threshold. **Quality value** is based on thresholded RSC (codes: -2:veryLow,-1:Low,0:Medium,1:High,2:veryHigh)		
+
+All samples are **below the critical threshold for NSC indicating a low signal to noise ratio**. This is reflected in the [low total number of peaks](https://dl.dropboxusercontent.com/u/35207958/harwell_chipseq/harwell_chipseq.html#peak-calling-narrowpeak) that are identified for both sample classes.
+
+```{r qc-measures-hepg2}
+phantomqc  <- read.delim("qc/quality_summary.txt", header=T, sep="\t", row.names=1)
+out <- phantomqc[,c("numReads", "NSC","RSC","quality")]
+rows <- sapply(row.names(out), function(x){strsplit(x, "-r")[[1]][1]}, USE.NAMES=F)
+row.names(out) <- summarydata$shortname[match(rows, summarydata$Name)]
+sampleName <- sapply(rows, function(x){strsplit(x, "_")[[1]][3]}, USE.NAMES=F)
+kable(cbind(sampleName,out), format='markdown')
+```
+
+We also used [deepTools](http://deeptools.readthedocs.org/en/latest/) to assess other quality measures of the data by efficiently extracting reads from BAM files and perform various computations on them. Some figures are shown below. 
+
+### Heatmap
+
+We use this check to assess reproducibility - either between replicates and/or between different experiments that might have used the same antibody or the same cell type. From the heatmap, we observe a block structure indicating two clear groups. The odd-numbered samples correspond to input samples and we see three of them clustering well to one another and less so with the treatment samples (even-numbered). There is however one input sample which appears to be clustering better with the treatment (CHS00052275).  
+
+```{r heatmap, fig.align='center', echo=FALSE, fig.align='center', message=FALSE}
+img1 <- readPNG("qc/deepTools/harwell_heatmap.png")
+grid.raster(img1)
+```
+
+### PCA
+
+Principal component analysis (PCA) can be used to determine whether samples display greater variability between experimental conditions than between replicates of the same treatment. PCA is also useful to identify unexpected patterns, such as those caused by batch effects or outliers. Here, we confirm what was observed with the heatmap -- the input for the 1ug antobody group appears to be a potential sample swap.
+
+```{r pca, fig.align='center', echo=FALSE, fig.align='center', message=FALSE}
+img2 <- readPNG("qc/deepTools/harwell_pcaplot.png")
+grid.raster(img2)
+```
+
+## Peak Calling: narrowPeak
+Peak calling was performed with MACS2 using the narrowPeak caller with a relaxed threshold of p < 0.001. This allows us to start with a larger list of regions as input for IDR analysis. The **number of peaks generated at an FDR of 0.05** are very few for each of the samples -- with particularly low numbers for the second replicate of the 1ug anti-PRDM samples (we expected this based on clustering and PCA plots above). 
+
+
+```{r macs-peaks, fig.align='center', echo=FALSE, fig.width=15}
+
+phantomqc$group <- summarydata$antibody[match(rows, summarydata$Name)]
+phantomqc$rep <- summarydata$batch[match(rows, summarydata$Name)]
+cols=c("purple", "grey")
+
+p1 <- ggplot(phantomqc, aes(x=rep, y=peaks_macs_pval)) +
+  geom_bar(aes(fill=group),  position="dodge", stat="identity") +
+  theme_bw() +
+  theme(panel.grid.major = element_line(size = .5, color = "grey"),
+        axis.text.x = element_text(angle=45, hjust=1),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) +
+        scale_fill_manual(values = cols) +
+  ylab("Peaks (p < 0.001)") + 
+  xlab("") 
+
+p2 <- ggplot(phantomqc, aes(x=rep, y=peaks_macs_qval)) +
+  geom_bar(aes(fill=group),  position="dodge", stat="identity") +
+  theme_bw() +
+  theme(panel.grid.major = element_line(size = .5, color = "grey"),
+        axis.text.x = element_text(angle=45, hjust=1),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) +
+        scale_fill_manual(values = cols) +
+  ylab("Peaks (q < 0.05)") + 
+  xlab("")
+
+grid.arrange(p1, p2, ncol=2)
+    
+```
+
+
+## IDR: Irreproducible Discovery Rate
+The IDR method compares a pair of ranked lists of regions (such as ChIP-seq peaks), to identify reproducible signals. These ranked lists should not be pre-thresholded i.e. they should provide identifications across the entire spectrum of high confidence/enrichment (signal) and low confidence/enrichment (noise). Samples were run through the new [beta version of IDR](https://github.com/nboley/idr) (the older version is not being maintained). 
+
+The IDR pipeline is as follows:
+
+1. Take each alignment file and call peaks using MACS2 v2.1.0. Rather than calling peaks at a given FDR, we provide a more liberal threshold. For MACS2 the q-value threshold unfortunately is partially tied to peak widths. Relaxing the q-value thresholds, you get more peaks, but also results in wider and wider peaks- resulting in loss of precision. Instead we supply a **p-value threshold (p < 0.001)** which relaxes the threshold enough to give us peak lists for ample comaprison across replicates.
+
+2. The narrowPeak files generated by MACS are used as input to IDR, with replicates for each sample group being run together. This will result in a [merged peak file](https://github.com/nboley/idr#output-file-format), with IDR values for each peak.
+
+3. For each sample group we generated pooled pseudoreplicates, by merging the BAM (alignment files) across replicates and randomly splitting the reads in two files (pseudo-replicates). Each alignment file was then run through MACS2 and peak calls from each pseudo-replicate were used as input to IDR.
+
+The manual states that if starting with < 100K pre-IDR peaks for large genomes (human/mouse), then an **IDR threshold of 0.05** is more appropriate. For **pooled pseudo-replicates we applied and IDR threshold of 0.01**  We use a tighter threshold for pooled-pseudoreplicates since pooling and subsampling equalizes the pseudo-replicates in terms of data quality. So we err on the side of caution and use more stringent thresholds.
+
+### Results
+With the 4ug antibody samples we find 42 peaks overlapping between replicates (using the relaxed threshold). Of these, **only 28 peaks are identified as reproducible based on and IDR threshold < 0.05**. For the 1ug samples, the  intersections are too few (2 regions), and therefore too hard to learn any statistics from it. This may change if we try calling peaks using the only Input_rep1 for both samples. The IDR BED files for the 4ug samples can be downloaded via the ilnks below:
+
+* IDR [merged peak file](./results/PRDM-high-idr-merged.bed)
+* IDR [replicate1 peak file](./results/PRDM-high-idr-replicate1.bed)
+* IDR [replicate2 peak file](./results/PRDM-high-idr-replicate2.bed)
+
+> *NOTE:* For each replicate BED file there are five columns corresponding to chromosome, start, end, score and -log10 IDR score. The coordinates represent the peaks that were identified from MACS2 peak calling. The merged peak files contains regions representing the merged regions where peaks were found to overlap between replicates. More details on the information contained in this file can be found in the [manual](https://github.com/nboley/idr#output).
+>
+
+
+### Target genes identified
+
+We used the merged peak BED file as input to [GREAT](http://bejerano.stanford.edu/great/public/html/), a tool which assigns biological meaning to a set of regions by analyzing annotations of nearby genes. The full list of 42 regions (no IDR threshold) returned a **list of 17 associated genes**. Since the list of genes are so few it is difficult to obtain any functional enrichment on this set of genes. Roughly 75% of the regions identify with one or more genes, and many of these regions fairly close in proximity to the TSS (< 50kB).
+
+* [Genes per region histogram](./results/assocCountHisto.pdf)
+* [Distance to TSS](./results/asscoTSS.pdf)
+
+We compared this list of [target genes](./results/GREAT-mm10-allIDR-gene.txt) to gene lists identified from RNA-seq differential expression analysis and found only one gene to overlap, Epha7.
+
+```{r target-gene-overlap}
+
+# Load RNA-seq genes
+downreg <- read.table("gene list//down-regulated_genes.txt", header=T)
+downreg <- as.character(downreg$geneSymbol)
+upreg <- read.table("gene list//up-regulated_genes.txt", header=T)
+upreg <- as.character(upreg$geneSymbol)
+
+# Load the target genes 
+target_genes <- read.delim("results/GREAT-mm10-allIDR-gene.txt", sep="\t", comment.char="#", header=F)
+target_genes <- as.character(target_genes[,1])
+
+# Overlap 
+# length(which(target_genes %in% downreg))
+# length(which(target_genes %in% upreg))
+
+```
+
+
